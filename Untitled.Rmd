@@ -1,0 +1,289 @@
+---
+title: "titanic_competition"
+author: "Salma Elshahawy"
+date: "12/10/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(readr)
+```
+
+```{r}
+train_df <- read.csv("train.csv", stringsAsFactors = FALSE)
+train_df$Survived <- as.factor(train_df$Survived)
+head(train_df)
+paste("Mean is: ",mean(train_df$Age))
+paste("Median is: " ,median(train_df$Age))
+paste("Mode is: " ,mode(train_df$Age))
+paste("Standard deviation is: " ,sd(train_df$Age))
+```
+
+```{r}
+# Impute missing ages in Training data
+
+train_df %>% select(-Ticket, -Name, -Cabin, -Embarked) -> train_ages
+pre_proc <- preProcess(train_ages, method = "bagImpute")
+train_ages <- predict(pre_proc, train_ages)
+train_df$Age <- train_ages$Age
+head(train_df)
+```
+```{r}
+prop.table(table(train_df$Sex,train_df$Survived),margin=1)
+```
+
+
+```{r}
+train_df %>%
+  mutate(family_size = SibSp + Parch + 1) -> train_df
+
+train_df
+```
+
+```{r}
+# plot sibsp vs parch - survival/dead cat/cat
+p4 <- ggplot(train_df, aes(factor(family_size), fill = Survived)) + 
+  geom_bar() +
+  facet_wrap(~Pclass*Sex)
+
+p4
+```
+
+```{r}
+ggplot(train_df, mapping = aes(x = Survived, y = Age, fill = Survived)) + 
+  geom_boxplot(outlier.colour = "red", outlier.shape = 5, outlier.size = 4) + 
+  facet_wrap(~Sex)
+paste("Mean is: ",mean(train_df$Age))
+paste("Median is: " ,median(train_df$Age))
+paste("Mode is: " ,mode(train_df$Age))
+paste("Standard deviation is: " ,sd(train_df$Age))
+```
+
+We had some outliers here need to be normalized for the age. 
+
+# Outlier in Age imputation 
+
+```{r}
+capOutlier <- function(x){
+   qnt <- quantile(x, probs=c(.25, .75))
+   caps <- quantile(x, probs=c(.05, .95))
+   H <- 1.5 * IQR(x, na.rm = T)
+   x[x < (qnt[1] - H)] <- caps[1]
+   x[x > (qnt[2] + H)] <- caps[2]
+   return(x)
+}
+train_df$Age=capOutlier(train_df$Age)
+ggplot(train_df, mapping = aes(x = Survived, y = Age, fill = Survived)) + 
+  geom_boxplot(outlier.colour = "red", outlier.shape = 8, outlier.size = 4) + 
+  facet_wrap(~Sex)
+paste("Mean is: ",mean(train_df$Age))
+paste("Median is: " ,median(train_df$Age))
+paste("Mode is: " ,mode(train_df$Age))
+paste("Standard deviation is: " ,sd(train_df$Age))
+```
+
+
+```{r}
+ggplot(train_df, aes(factor(Embarked), fill = Survived)) + 
+  geom_bar() + 
+  facet_wrap(~Pclass)
+# Southampton seems to be the most embarked that had survivals
+```
+
+
+Do some feature engineering by extracting extra embeded information from our data
+First, Extract title from name as a new column
+
+```{r}
+# train_df$Title <- sapply(train_df$Name, FUN=function(x) {strsplit(x, split='[,.]')[[1]][2]})
+train_df %>%
+  rowwise %>%
+  mutate(title = gsub('(.*, )|(\\..*)', '', Name))-> train_df
+train_df$Surname <- sapply(train_df$Name, FUN=function(x) {strsplit(x, split='[,.]')[[1]][1]})
+
+train_df$title[train_df$title %in% c('Mme', 'Mlle')] <- 'Mlle'
+train_df$title[train_df$title %in% c('Capt', 'Don', 'Major', 'Sir')] <- 'Sir'
+train_df$title[train_df$title %in% c('Dona', 'Lady', 'the Countess', 'Jonkheer')] <- 'Lady'
+```
+
+```{r}
+library(forcats)
+ggplot(train_df, aes(fct_infreq(factor(title)), fill = Survived)) +
+  geom_bar() +
+  coord_flip() +
+  facet_wrap(~Sex)
+  ggtitle("Survival by titles")
+```
+
+
+Survived females are more than males - so we are on the right track
+
+Extract ticket number - the first three digit after subressing letters
+
+```{r}
+train_df %>%
+  mutate(ticket = gsub("([^\\d]+[2,5].\\s)|([A-Z]+\\/[5])|([^\\d])", "", Ticket, perl = TRUE))  -> train_df
+
+train_df$ticket <- substr(train_df$ticket, 0, 3)
+transform(train_df, ticket = as.numeric(ticket)) -> train_df
+train_df
+```
+
+We have some NAs, impute them using `mice package`
+
+```{r}
+# clean up NAs
+sapply(train_df, function(x) sum(is.na(x)))
+# PassengerId    Survived      Pclass        Name         Sex         Age       SibSp       Parch      Ticket        Fare 
+#           0           0           0           0           0           0           0           0           0           0 
+#       Cabin    Embarked 
+#           0           0 
+```
+
+```{r}
+library(mice)
+init = mice(train_df, maxit=0) 
+meth = init$method
+predM = init$predictorMatrix
+predM[, c("PassengerId")]=0
+meth[c("ticket")]="norm" 
+set.seed(103)
+imputed = mice(train_df, method=meth, predictorMatrix=predM, m=5)
+train_df <- complete(imputed)
+sapply(train_df, function(x) sum(is.na(x)))
+```
+
+```{r}
+test_df <- read.csv("test.csv", stringsAsFactors = FALSE)
+# Impute missing ages in Training data
+test_df %>% select(-Ticket, -Name, -Cabin, -Embarked) -> test_ages
+
+pre_proc <- preProcess(test_ages, method = "bagImpute")
+test_ages <- predict(pre_proc, test_ages)
+test_df$Age <- test_ages$Age
+head(test_df)
+```
+
+```{r}
+test_df %>%
+  mutate(family_size = SibSp + Parch + 1) -> test_df
+
+test_df
+```
+
+```{r}
+capOutlier <- function(x){
+   qnt <- quantile(x, probs=c(.25, .75))
+   caps <- quantile(x, probs=c(.05, .95))
+   H <- 1.5 * IQR(x, na.rm = T)
+   x[x < (qnt[1] - H)] <- caps[1]
+   x[x > (qnt[2] + H)] <- caps[2]
+   return(x)
+}
+test_df$Age=capOutlier(test_df$Age)
+```
+
+```{r}
+test_df %>%
+  rowwise %>%
+  mutate(title = gsub('(.*, )|(\\..*)', '', Name))-> test_df
+test_df$Surname <- sapply(test_df$Name, FUN=function(x) {strsplit(x, split='[,.]')[[1]][1]})
+
+test_df$title[test_df$title %in% c('Mme', 'Mlle')] <- 'Mlle'
+test_df$title[test_df$title %in% c('Capt', 'Don', 'Major', 'Sir')] <- 'Sir'
+test_df$title[test_df$title %in% c('Dona', 'Lady', 'the Countess', 'Jonkheer')] <- 'Lady'
+```
+
+```{r}
+test_df %>%
+  mutate(ticket = gsub("([^\\d]+[2,5].\\s)|([A-Z]+\\/[5])|([^\\d])", "", Ticket, perl = TRUE))  -> test_df
+
+test_df$ticket <- substr(test_df$ticket, 0, 3)
+transform(test_df, ticket = as.numeric(ticket)) -> test_df
+test_df
+```
+
+```{r}
+library(mice)
+init = mice(test_df, maxit=0) 
+meth = init$method
+predM = init$predictorMatrix
+predM[, c("PassengerId")]=0
+meth[c("ticket")]="norm" 
+set.seed(103)
+imputed = mice(test_df, method=meth, predictorMatrix=predM, m=5)
+test_df <- complete(imputed)
+```
+
+
+
+```{r}
+trctrl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10)
+```
+
+```{r}
+set.seed(825)
+
+fit1 <- train(Survived ~ Age + Pclass + Sex + Embarked + ticket + title + family_size + Fare + Cabin,
+                 data = train_df,
+                 method = "ranger",
+                 trControl = trctrl,
+                 ## This last option is actually one
+                 ## for gbm() that passes through
+                 verbose = FALSE)
+fit1
+```
+
+
+```{r}
+tgctrl <- expand.grid(
+    .mtry = 12,
+    .splitrule = "gini",
+    .min.node.size = 17)
+
+set.seed(1000)
+model.cv <- train(Survived ~ Age + Pclass + Sex + Embarked + ticket + title + family_size + Fare,
+               data = train_df,
+               trControl = trctrl,
+               metric = "Accuracy",
+               importance = "impurity",
+               tuneGrid = tgctrl,
+               num.trees = 1500,
+               method = "ranger")
+model.cv
+```
+
+
+```{r}
+ggplot(varImp(model.cv))
+```
+
+```{r}
+Survived <- predict(model.cv, test_df)
+test_df %>%
+    cbind(., Survived) -> test_pred
+test_pred %>%
+  select(PassengerId, Survived) -> test_final
+test_final
+```
+
+```{r}
+ggplot(test_final, aes(fct_infreq(factor(Survived)))) +
+  geom_bar()
+```
+
+```{r}
+write_csv(test_final, 'test_output.csv')
+```
+
